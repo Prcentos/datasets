@@ -74,6 +74,13 @@ class DatasetBuilderTestCase(parameterized.TestCase, test_utils.SubTestCase):
     BUILDER_CONFIG_NAMES_TO_TEST: `list[str]`, the list of builder configs
       that should be tested. If None, all the BUILDER_CONFIGS from the class
       will be tested.
+    BUILDER_CONFIG_NAME_TO_FAKE_FILE_NAME: `dict[str]`, an optional mapping from
+      builder config names to fake file names returned by the method
+      `download_and_extract` during the test. It is useful if the different
+      builders tested expect different files from the fake example directory
+      associated with the test. If None, the `download_and_extract` returns the
+      result according to the setting in `DL_EXTRACT_RESULT` or (if it is `None`
+      as well) the default setting.
     DL_EXTRACT_RESULT: `dict[str]`, the returned result of mocked
       `download_and_extract` method. The values should be the path of files
       present in the `fake_examples` directory, relative to that directory.
@@ -103,6 +110,7 @@ class DatasetBuilderTestCase(parameterized.TestCase, test_utils.SubTestCase):
 
   DATASET_CLASS = None
   BUILDER_CONFIG_NAMES_TO_TEST = None
+  BUILDER_CONFIG_NAME_TO_FAKE_FILE_NAME = None
   DL_EXTRACT_RESULT = None
   EXAMPLE_DIR = None
   OVERLAPPING_SPLITS = []
@@ -177,12 +185,19 @@ class DatasetBuilderTestCase(parameterized.TestCase, test_utils.SubTestCase):
     self.assertIsInstance(info, dataset_info.DatasetInfo)
     self.assertEqual(self.builder.name, info.name)
 
-  def _get_dl_extract_result(self, url):
-    del url
-    if self.DL_EXTRACT_RESULT is None:
-      return self.example_dir
-    return utils.map_nested(lambda fname: os.path.join(self.example_dir, fname),
-                            self.DL_EXTRACT_RESULT)
+  def _create_dl_extractor_mock(self, fname=None):
+
+    def _get_dl_extract_result(instance, url):
+      del instance, url
+      if fname:
+        return os.path.join(self.example_dir, fname)
+      if self.DL_EXTRACT_RESULT is None:
+        return self.example_dir
+      return utils.map_nested(
+          lambda fname: os.path.join(self.example_dir, fname),
+          self.DL_EXTRACT_RESULT)
+
+    return _get_dl_extract_result
 
   def _make_builder(self, config=None):
     return self.DATASET_CLASS(data_dir=self.tmp_dir, config=config)  # pylint: disable=not-callable
@@ -205,18 +220,24 @@ class DatasetBuilderTestCase(parameterized.TestCase, test_utils.SubTestCase):
             (config.name not in self.BUILDER_CONFIG_NAMES_TO_TEST)):  # pylint: disable=unsupported-membership-test
           print("Skipping config %s" % config.name)
           continue
+        fname = None
+        if (self.BUILDER_CONFIG_NAME_TO_FAKE_FILE_NAME is not None and
+            config.name in self.BUILDER_CONFIG_NAME_TO_FAKE_FILE_NAME):  # pylint: disable=unsupported-membership-test
+          fname = self.BUILDER_CONFIG_NAME_TO_FAKE_FILE_NAME[config.name]
+          print(("Per builder fake download result is defined: "
+                 "%s for confi: %s") % (fname, config.name))
         with self._subTest(config.name):
           print("Testing config %s" % config.name)
           builder = self._make_builder(config=config)
-          self._download_and_prepare_as_dataset(builder)
+          self._download_and_prepare_as_dataset(builder, fname)
     else:
       self._download_and_prepare_as_dataset(self.builder)
 
-  def _download_and_prepare_as_dataset(self, builder):
+  def _download_and_prepare_as_dataset(self, builder, fname=None):
     with absltest.mock.patch.multiple(
         "tensorflow_datasets.core.download.DownloadManager",
-        download_and_extract=self._get_dl_extract_result,
-        download=self._get_dl_extract_result,
+        download_and_extract=self._create_dl_extractor_mock(fname),
+        download=self._create_dl_extractor_mock(fname),
         manual_dir=self.example_dir,
     ):
       if isinstance(builder, dataset_builder.BeamBasedBuilder):
@@ -325,4 +346,3 @@ def compare_shapes_and_types(tensor_info, output_types, output_shapes):
       expected_shape = feature_info.shape
       output_shape = output_shapes[feature_name]
       tf_utils.assert_shape_match(expected_shape, output_shape)
-
